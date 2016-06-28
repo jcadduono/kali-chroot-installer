@@ -1,0 +1,115 @@
+#!/system/bin/sh
+
+if [ -x /system/xbin/busybox_nh ]; then
+	busybox=/system/xbin/busybox_nh
+elif [ -x /sbin/busybox_nh ]; then
+	busybox=/sbin/busybox_nh
+elif [ -x /system/xbin/busybox ]; then
+	busybox=/system/xbin/busybox
+elif [ -x /data/local/bin/busybox ]; then
+	busybox=/data/local/bin/busybox
+elif [ -x /system/bin/busybox ]; then
+	busybox=/system/bin/busybox
+else
+	echo "Busybox not found!  Install it, dummy!"
+	log "Busybox not found!  Install it, dummy!"
+	exit 1
+fi
+
+su 0 setenforce 0
+
+######### CHECK FOR ROOT #########
+f_checkforroot(){
+	perm=$(id | $busybox cut -b 5)
+	if [ "$perm" != "0" ]; then
+		echo "ROOT NOT DETECTED! Type: su or install SuperSU to fix"
+		exit 1
+	fi
+}
+
+######### VARIABLES #########
+mnt=/data/local/nhsystem/kali-armhf
+
+######### CHECK FOR INSTALL #########
+#
+# There is a bug that will create the resolv.conf
+# If we continue on with bootkali even after we
+# remove chroot.  So stop here if removed or else
+# chroot is never uninstalled.
+
+if [ ! -d "$mnt/usr" ]; then
+    echo "Missing a required folder. Something isn't right"
+    exit 1
+fi
+
+######### SET TUN ########
+mkdir -p /dev/net
+ln -s /dev/tun /dev/net/tun 2> /dev/null
+
+######### SET DNS ########
+> $mnt/etc/resolv.conf # empty dns entries
+
+for i in 1 2 3 4; do
+	if [ -z "$(getprop net.dns${i})" ]; then
+		# we go through 1-4 dns servers and break out of loop on empty
+		break
+	else
+		# add local/device dns server first
+		echo "nameserver $(getprop net.dns${i})" >> $mnt/etc/resolv.conf
+	fi
+done
+
+# lastly add two default dns entries
+echo "nameserver 208.67.222.222" >> $mnt/etc/resolv.conf
+echo "nameserver 208.67.220.220" >> $mnt/etc/resolv.conf
+chmod 644 $mnt/etc/resolv.conf
+
+######### MOUNT #########
+
+## Should run always (https://su.chainfire.eu/#how-mount)
+$busybox mount -o remount,suid /data
+
+# If chroot's /dev is mounted, assume the chroot is already running and skip initialization
+if ! $busybox mountpoint -q $mnt/dev; then
+	f_checkforroot
+
+	$busybox mount -r -o bind /system $mnt/system
+
+	if $busybox mountpoint -q "$EXTERNAL_STORAGE"; then
+		$busybox mount -o bind "$EXTERNAL_STORAGE" $mnt/sdcard
+	elif $busybox mountpoint -q /storage/emulated/0; then
+		$busybox mount -o bind /storage/emulated/0 $mnt/sdcard
+	elif $busybox mountpoint -q /storage/emulated/legacy; then
+		$busybox mount -o bind /storage/emulated/legacy $mnt/sdcard
+	else
+		$busybox mount -o bind /sdcard $mnt/sdcard
+	fi
+
+	# Grab the first available secondary storage and assume it's a micro SDcard
+	SDCARD=$(echo "$SECONDARY_STORAGE" | $busybox cut -d: -f1)
+	if $busybox mountpoint -q "$SDCARD"; then
+		$busybox mount -o bind "$SDCARD" $mnt/external_sd
+	fi
+
+	$busybox mount -o bind /storage/usbdisk $mnt/mnt/usbdisk
+	$busybox mount -o bind /dev $mnt/dev
+	$busybox mount -t devpts devpts $mnt/dev/pts
+	$busybox mount -t proc proc $mnt/proc
+	$busybox mount -t sysfs sysfs $mnt/sys
+
+	$busybox chmod 666 /dev/null
+
+	# SET 250MB TO ALLOW POSTGRESQL #
+	$busybox sysctl -w kernel.shmmax=268435456
+
+	# NETWORK SETTINGS #
+	$busybox sysctl -w net.ipv4.ip_forward=1
+	echo "127.0.0.1		 localhost kali" > $mnt/etc/hosts
+	echo "::1				 localhost ip6-localhost ip6-loopback" >> $mnt/etc/hosts
+	echo "kali" > $mnt/proc/sys/kernel/hostname
+
+	echo "The Kali chroot has been started."
+	log "The Kali chroot has been started."
+else
+	echo "The Kali chroot is already running!"
+fi
